@@ -61,44 +61,33 @@
 </div></main></div>
 <div id="modalRoot"></div><div id="toastRoot"></div>
 <script>
-const API='/api';
+const API=(window.DEVSPACE_API_BASE||'/api').replace(/\/$/,'');
 let state={users:[],projects:[]},currentUser='',page='home',profileTarget='',detailTarget='';
 const $=s=>document.querySelector(s), $$=s=>Array.from(document.querySelectorAll(s));
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-// Standalone preview: no server or installation required. Data stays in this browser only.
-const LOCAL_KEY='devspace-local-demo-v1';
+// Local preview is intentionally isolated. On a published site, all accounts must use the shared server.
+const LOCAL_KEY='devspace-local-preview-v2';
 function randomToken(){const bytes=new Uint8Array(32);crypto.getRandomValues(bytes);return Array.from(bytes,b=>b.toString(16).padStart(2,'0')).join('')}
 function localDB(){
  try{
   let db=JSON.parse(localStorage.getItem(LOCAL_KEY));
-  if(!db){
-   db={users:[
-    {name:'Alex',password:'',bio:'Делаю небольшие игры и эксперименты.'},
-    {name:'Mira',password:'',bio:'Люблю веб-дизайн и JavaScript.'},
-    {name:'PixelFox',password:'',bio:'Создаю пиксельные миры и инструменты.'}
-   ],projects:[
-    {id:'demo-1',title:'Pixel Runner',language:'JavaScript',category:'Игра',description:'Демонстрационный проект участника Alex. Нажми на автора, чтобы открыть профиль и остальные проекты.',author:'Alex',likes:7,likedBy:[],created:Date.now()-300000,symbol:'▶',theme:'orange',files:[]},
-    {id:'demo-2',title:'Мой первый сайт',language:'HTML / CSS',category:'Сайт',description:'Пример проекта, опубликованного Mira. В настоящем общем сервисе такой проект был бы виден всем участникам.',author:'Mira',likes:12,likedBy:[],created:Date.now()-200000,symbol:'</>',theme:'blue',files:[]},
-    {id:'demo-3',title:'Pixel World',language:'Python',category:'Приложение',description:'Пример работы PixelFox. Открой профиль автора, чтобы увидеть все его проекты.',author:'PixelFox',likes:4,likedBy:[],created:Date.now()-100000,symbol:'▦',theme:'mint',files:[]},
-    {id:'demo-4',title:'Мини-калькулятор',language:'JavaScript',category:'Приложение',description:'Ещё один пример проекта пользователя Alex.',author:'Alex',likes:3,likedBy:[],created:Date.now()-50000,symbol:'±',theme:'blue',files:[]}
-   ],session:'',demoSeeded:true};
-   localStorage.setItem(LOCAL_KEY,JSON.stringify(db));
-  }
+  if(!db){db={users:[],projects:[],session:''};localStorage.setItem(LOCAL_KEY,JSON.stringify(db));}
   if(!Array.isArray(db.users))db.users=[]; if(!Array.isArray(db.projects))db.projects=[]; return db;
  }catch{return {users:[],projects:[],session:''}}
 }
 function saveLocal(db){localStorage.setItem(LOCAL_KEY,JSON.stringify(db))}
 async function api(path,opts={}){
- // Use the shared Express server when hosted; retain the standalone demo for file:// preview.
+ // Only file:// preview uses localStorage. Never silently pretend GitHub Pages has a shared database.
  if(location.protocol!=='file:'){
-  try{
-   const response=await fetch(API+path,{...opts,credentials:'same-origin'});
-   const payload=await response.json().catch(()=>({}));
-   if(!response.ok)throw Error(payload.error||'Ошибка сервера ('+response.status+').');
-   return payload;
-  }catch(err){
-   if(err && err.message && !/Failed to fetch|NetworkError|Load failed|Ошибка сервера \((404|405)\)/i.test(err.message))throw err;
+  let response;
+  try { response=await fetch(API+path,{...opts,credentials:'include'}); }
+  catch(err){ throw Error('Не удаётся подключиться к общему серверу DevSpace. GitHub Pages хранит только HTML и не сохраняет общих пользователей. Разверни сервер из server.js и открой сайт по адресу этого сервера.'); }
+  const payload=await response.json().catch(()=>({}));
+  if(!response.ok){
+   if(response.status===404||response.status===405) throw Error('Общий сервер DevSpace не подключён: API вернул '+response.status+'. GitHub Pages не запускает server.js. Разверни сервер и открой его адрес.');
+   throw Error(payload.error||'Ошибка сервера ('+response.status+').');
   }
+  return payload;
  }
  const db=localDB(), method=(opts.method||'GET').toUpperCase(); let body={};
  if(typeof opts.body==='string'){try{body=JSON.parse(opts.body)}catch{}}
@@ -181,11 +170,11 @@ function renderDetail(id){const p=state.projects.find(x=>x.id===id);if(!p){$('#d
 function renderPreview(){if(!$('#livePreview'))return;const p={title:$('#title').value||'Название твоего проекта',language:$('#language').value,category:$('#category').value,description:$('#description').value||'Здесь появится описание твоей работы.',author:currentUser||'Твоё имя',likes:0,liked:false,symbol:'</>',theme:'blue'};$('#livePreview').innerHTML=projectCard(p)}
 $$('[data-page]').forEach(b=>b.addEventListener('click',()=>go(b.dataset.page)));$('#search').oninput=renderExplore;$('#filterLang').onchange=renderExplore;$('#sort').onchange=renderExplore;
 ['title','language','category','description'].forEach(id=>$('#'+id).addEventListener('input',()=>{if(id==='description')$('#count').textContent=$('#description').value.length;renderPreview()}));
-$('#projectFiles').onchange=()=>$('#fileNames').textContent=Array.from($('#projectFiles').files).map(f=>f.name).join(', ')||'Файлы до 10 МБ каждый сохраняются в этом браузере и доступны для скачивания';$('#projectImage').onchange=()=>{$('#projectImage').nextElementSibling.textContent=$('#projectImage').files[0]?.name||'Будет показана на карточке'};
-$('#projectForm').onreset=()=>setTimeout(()=>{$('#count').textContent='0';$('#fileNames').textContent='Файлы до 10 МБ каждый сохраняются в этом браузере и доступны для скачивания';$('#publishNotice').classList.add('hidden');renderPreview()},0);
-$('#projectForm').onsubmit=async e=>{e.preventDefault();if(!currentUser){openAuth('login');toast('Сначала войди в аккаунт');return}const title=$('#title').value.trim();if(!title)return toast('Введи название проекта');const fd=new FormData();fd.append('title',title);fd.append('language',$('#language').value);fd.append('category',$('#category').value);fd.append('description',$('#description').value.trim());for(const f of $('#projectFiles').files)fd.append('files',f);if($('#projectImage').files[0])fd.append('image',$('#projectImage').files[0]);try{const p=await api('/projects',{method:'POST',body:fd});$('#projectForm').reset();await boot();detailTarget=p.id;go('detail');toast('Проект добавлен в этот браузерный предпросмотр')}catch(err){toast(err.message)}};
+$('#projectFiles').onchange=()=>$('#fileNames').textContent=Array.from($('#projectFiles').files).map(f=>f.name).join(', ')||'Файлы до 10 МБ каждый сохраняются на сервере и доступны всем участникам';$('#projectImage').onchange=()=>{$('#projectImage').nextElementSibling.textContent=$('#projectImage').files[0]?.name||'Будет показана на карточке'};
+$('#projectForm').onreset=()=>setTimeout(()=>{$('#count').textContent='0';$('#fileNames').textContent='Файлы до 10 МБ каждый сохраняются на сервере и доступны всем участникам';$('#publishNotice').classList.add('hidden');renderPreview()},0);
+$('#projectForm').onsubmit=async e=>{e.preventDefault();if(!currentUser){openAuth('login');toast('Сначала войди в аккаунт');return}const title=$('#title').value.trim();if(!title)return toast('Введи название проекта');const fd=new FormData();fd.append('title',title);fd.append('language',$('#language').value);fd.append('category',$('#category').value);fd.append('description',$('#description').value.trim());for(const f of $('#projectFiles').files)fd.append('files',f);if($('#projectImage').files[0])fd.append('image',$('#projectImage').files[0]);try{const p=await api('/projects',{method:'POST',body:fd});$('#projectForm').reset();await boot();detailTarget=p.id;go('detail');toast('Проект опубликован и сохранён на сервере')}catch(err){toast(err.message)}};
 async function boot(){const d=await api('/state');state=d;currentUser=d.currentUser||'';renderUserArea();go(page)}
-boot();
+boot().catch(err=>{console.error('DevSpace: сервер недоступен',err);renderUserArea();toast(err.message||'Не удалось загрузить общие данные DevSpace.');});
 
 </script>
 </body></html>
