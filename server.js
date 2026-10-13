@@ -12,7 +12,8 @@ const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, 'data');
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(ROOT, 'uploads');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 const SESSION_SECRET_FILE = path.join(DATA_DIR, 'session-secret.txt');
-for (const dir of [DATA_DIR, UPLOAD_DIR]) fs.mkdirSync(dir, { recursive: true });
+const USERS_DIR = path.join(DATA_DIR, 'users');
+for (const dir of [DATA_DIR, UPLOAD_DIR, USERS_DIR]) fs.mkdirSync(dir, { recursive: true });
 // Keep the session key stable between restarts, so existing login cookies remain valid.
 // Production deployments should set SESSION_SECRET through their hosting environment.
 function getSessionSecret() {
@@ -44,7 +45,24 @@ function loadDb() {
 }
 let db = loadDb();
 let writeQueue = Promise.resolve();
-function persist() { writeQueue = writeQueue.then(() => fs.promises.writeFile(DB_FILE + '.tmp', JSON.stringify(db, null, 2)).then(() => fs.promises.rename(DB_FILE + '.tmp', DB_FILE))); return writeQueue; }
+function persist() {
+  writeQueue = writeQueue.then(async () => {
+    await fs.promises.writeFile(DB_FILE + '.tmp', JSON.stringify(db, null, 2));
+    await fs.promises.rename(DB_FILE + '.tmp', DB_FILE);
+    const index = [];
+    for (const u of db.users) {
+      const file = crypto.createHash('sha256').update(u.name.toLowerCase()).digest('hex') + '.json';
+      const userProjects = db.projects.filter(p => p.author === u.name).map(p => ({
+        id:p.id, title:p.title, language:p.language, category:p.category,
+        description:p.description, created:p.created, files:(p.files||[]).map(f=>({id:f.id,name:f.name,size:f.size}))
+      }));
+      await fs.promises.writeFile(path.join(USERS_DIR,file), JSON.stringify({name:u.name,bio:u.bio||'',projects:userProjects},null,2));
+      index.push({ name:u.name, file });
+    }
+    await fs.promises.writeFile(path.join(USERS_DIR,'index.json'), JSON.stringify(index,null,2));
+  });
+  return writeQueue;
+}
 app.disable('x-powered-by');
 // Hosting providers such as Render terminate HTTPS at a reverse proxy.
 if (process.env.NODE_ENV === 'production') app.set('trust proxy', 1);
@@ -73,6 +91,28 @@ app.post('/api/register', async (req,res) => {
 });
 app.post('/api/login', async (req,res) => { const name=cleanName(req.body.name), password=String(req.body.password||''); const u=db.users.find(x=>x.name.toLowerCase()===name.toLowerCase()); if(!u || !u.passwordHash || !(await bcrypt.compare(password,u.passwordHash))) return res.status(401).json({error:'Неверное имя пользователя или пароль.'}); req.session.user=u.name; res.json({user:safeUser(u)}); });
 app.post('/api/logout',(req,res)=>req.session.destroy(()=>{res.clearCookie('connect.sid');res.json({ok:true})}));
+// Portable account file uses a random revocable token; it never contains the user's password.
+// GET is used for export because some hosting/security layers block POST download endpoints.
+async function sendAccountExport(req,res){
+  const u=db.users.find(x=>x.name===req.session.user);
+  if(!u)return res.status(404).json({error:'Пользователь не найден.'});
+  const token=crypto.randomBytes(32).toString('hex');
+  u.accountTokenHash=crypto.createHash('sha256').update(token).digest('hex');
+  await persist();
+  res.set('Cache-Control','no-store');
+  res.json({type:'devspace-account',version:1,name:u.name,token,createdAt:new Date().toISOString()});
+}
+app.get('/api/account/export',auth,sendAccountExport);
+app.post('/api/account/export',auth,sendAccountExport); // Backward compatibility with older site copies.
+app.post('/api/account/import',async(req,res)=>{
+  const name=cleanName(req.body.name), token=String(req.body.token||'');
+  if(req.body.type!=='devspace-account'||!name||!/^[a-f0-9]{64}$/i.test(token))return res.status(400).json({error:'Файл аккаунта повреждён или имеет неверный формат.'});
+  const u=db.users.find(x=>x.name.toLowerCase()===name.toLowerCase());
+  const tokenHash=crypto.createHash('sha256').update(token).digest('hex');
+  if(!u||!u.accountTokenHash||!crypto.timingSafeEqual(Buffer.from(tokenHash,'hex'),Buffer.from(u.accountTokenHash,'hex')))return res.status(401).json({error:'Файл аккаунта недействителен. Войди по паролю и скачай новый файл.'});
+  req.session.user=u.name;
+  res.json({user:safeUser(u)});
+});
 app.patch('/api/profile',auth,async(req,res)=>{const u=db.users.find(x=>x.name===req.session.user);if(!u)return res.status(404).json({error:'Пользователь не найден.'});u.bio=String(req.body.bio||'').slice(0,240);await persist();res.json({user:safeUser(u)});});
 app.post('/api/projects',auth,upload.fields([{name:'files',maxCount:10},{name:'image',maxCount:1}]),async(req,res)=>{
   const title=String(req.body.title||'').trim(); if(!title || title.length>80){cleanupUploads(req.files);return res.status(400).json({error:'Название проекта обязательно (до 80 символов).'});}
@@ -85,4 +125,4 @@ app.delete('/api/projects/:id',auth,async(req,res)=>{const i=db.projects.findInd
 app.get('/api/projects/:id/files/:fileId',(req,res)=>{const p=db.projects.find(x=>x.id===req.params.id);const f=p?.files?.find(x=>x.id===req.params.fileId);if(!f)return res.status(404).send('Файл не найден');const target=path.join(UPLOAD_DIR,path.basename(f.storedName));if(!fs.existsSync(target))return res.status(404).send('Файл отсутствует на сервере');res.download(target,f.name);});
 app.use((err,req,res,next)=>{if(err instanceof multer.MulterError){const msg=err.code==='LIMIT_FILE_SIZE'?'Файл слишком большой (максимум 25 МБ).':'Слишком много файлов или полей.';return res.status(400).json({error:msg});}if(err)return res.status(400).json({error:err.message||'Ошибка запроса.'});next();});
 const port=Number(process.env.PORT)||3000;
-app.listen(port,'0.0.0.0',()=>console.log(`DevSpace запущен: http://localhost:${port}`));
+app.listen(port,'0.0.0.0',()=>console.log(`DevSpace запущен: https://vitushakagame-creator.github.io/dev_locator-xp/:${port}`));
